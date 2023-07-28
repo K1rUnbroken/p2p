@@ -76,6 +76,11 @@ func (s *P2PServer) Serve() {
 					// 该客户端已经失活了
 					if _, ok := s.AliveClients[addr]; !ok {
 						delete(s.FileClients[filename], addr)
+						fmt.Println("FileClients", s.FileClients["test.txt"])
+						continue
+					}
+					// 客户端本人
+					if addr == remoteAddr.String() {
 						continue
 					}
 					if b {
@@ -99,18 +104,20 @@ func (s *P2PServer) Serve() {
 			_ = file.Close()
 
 		// 客户端请求服务端，通知指定的client连接它
-		case ConnectOthers:
-			// 解析出client
+		case NeedAuth:
+			// 解析出clients
 			addrs := strings.Split(string(payload), ",")
 
 			// 通知这些clients
 			for _, addr := range addrs {
-				d, err := GetFrameBytes(ConnectOwn, 0, remoteAddr.String())
+				b, err := GetFrameBytes(NeedAuth, 0, remoteAddr.String())
 				dstAddr := AddrStrToUDPAddr(addr)
-				if err != nil {
-					conn.WriteToUDP(d, dstAddr)
+				if err == nil {
+					_, _ = conn.WriteToUDP(b, dstAddr)
 				}
 			}
+
+			fmt.Println(remoteAddr.String(), ":", addrs)
 
 		// 客户端直接在服务端下载整个文件
 		case Download:
@@ -154,6 +161,8 @@ func (s *P2PServer) Serve() {
 			// 解析出文件名
 			filename := string(payload)
 
+			fmt.Println(remoteAddr.String(), "download ok ", filename)
+
 			// 记录
 			if _, ok := s.FileClients[filename]; !ok {
 				s.FileClients[filename] = make(map[string]bool, 0)
@@ -166,6 +175,7 @@ func (s *P2PServer) Serve() {
 
 			// 心跳
 			if info == "ping" {
+				fmt.Println("receive ping from ", remoteAddr.String())
 				s.AliveClients[remoteAddr.String()].NextPing = time.Now().Add(PingPeriod)
 			}
 		}
@@ -181,15 +191,11 @@ func ping(s *P2PServer) {
 			for addr, cli := range s.AliveClients {
 				if time.Now().After(cli.NextPing) {
 					delete(s.AliveClients, addr)
-
 				}
 			}
 
-			fmt.Println("alive:")
-			for k := range s.AliveClients {
-				fmt.Print(k, " ")
-			}
-			fmt.Println()
+			fmt.Println("AliveClients", s.AliveClients)
+
 		}
 	}
 }

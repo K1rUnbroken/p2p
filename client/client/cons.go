@@ -1,4 +1,6 @@
-package service
+package client
+
+const FileRelativePath = "download/"
 
 const (
 	DataPiece   = iota // 数据片

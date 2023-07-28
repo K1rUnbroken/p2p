@@ -19,40 +19,13 @@ type fileInfo struct {
 }
 
 type Client struct {
-	ConnToSvr        *net.UDPConn
-	ConnToOthers     []*net.UDPConn
+	Lis              *net.UDPConn
 	AuthAddr         []string             // 有权限访问本机的remote
 	DownloadingFiles map[string]*fileInfo // 正在下载中的文件
 	MyAddr           *net.UDPAddr
 }
 
 //---------------------------------service--------------------------------
-
-func (cli *Client) ConnectServer(network string, raddr *net.UDPAddr) error {
-	// 连接server
-	conn, err := net.DialUDP(network, cli.MyAddr, raddr)
-	if err != nil {
-		return err
-	}
-	cli.ConnToSvr = conn
-
-	info := fmt.Sprintf("this is %s\n", cli.MyAddr.String())
-	d, err := GetFrameBytes(ConnectSvr, 0, info)
-	if err != nil {
-		return nil
-	}
-
-	// 发送
-	_, err = conn.Write(d)
-
-	// 开启goroutine接受server信息
-	go readFrom(cli, cli.ConnToSvr)
-
-	// 定时向服务器发送心跳
-	go ping(cli.ConnToSvr)
-
-	return err
-}
 
 func addrStrToUDPAddr(addr string) *net.UDPAddr {
 	port, _ := strconv.Atoi(strings.Split(addr, ":")[1])
@@ -64,19 +37,22 @@ func addrStrToUDPAddr(addr string) *net.UDPAddr {
 	return dstAddr
 }
 
-func ping(conn *net.UDPConn) {
-	t := time.NewTicker(time.Second * 5)
+func (cli *Client) ping() {
 	for {
-		select {
-		case <-t.C:
-			b, _ := GetFrameBytes(Message, 0, "ping")
-			_, _ = conn.Write(b)
+		b, err := GetFrameBytes(Message, 0, "ping")
+		if err != nil {
+			fmt.Println("send ping error: ", err)
 		}
+		_, err = cli.Lis.WriteToUDP(b, ServerAddr)
+		if err != nil {
+			fmt.Println("send ping error: ", err)
+		}
+		time.Sleep(time.Second * 5)
 	}
 }
 
-// 从指定连接读取数据帧
-func readFrom(cli *Client, conn *net.UDPConn) {
+func (cli *Client) read() {
+	conn := cli.Lis
 	frame := make([]byte, 1024)
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(frame)
@@ -100,7 +76,6 @@ func readFrom(cli *Client, conn *net.UDPConn) {
 			info := "authorization fail to connect " + cli.MyAddr.String()
 			b, _ := GetFrameBytes(Message, 0, info)
 			_, _ = conn.Write(b)
-			fmt.Println(info)
 			continue
 		}
 
@@ -140,16 +115,14 @@ func readFrom(cli *Client, conn *net.UDPConn) {
 
 			// 发送数据过去
 			d, err := GetFrameBytes(DataPiece, seq, "filename:"+filename+"\n"+string(fileData))
-			_, _ = conn.Write(d)
+			_, _ = conn.WriteToUDP(d, remoteAddr)
 
-		// 其他client通知自己向其发起连接
-		case ConnectOwn:
-			// 解析出remoteAddr
-			addr := parts[0]
-			dstAddr := addrStrToUDPAddr(addr)
-			// dial
-			_, _ = net.DialUDP("udp", cli.MyAddr, dstAddr)
+			fmt.Println("receive downloading request from ", remoteAddr.String())
+
+		// server通知自己授予某个client权限
+		case NeedAuth:
 			// 权限
+			addr := string(payload)
 			cli.AuthAddr = append(cli.AuthAddr, addr)
 
 		// 收到文件数据片
@@ -166,6 +139,8 @@ func readFrom(cli *Client, conn *net.UDPConn) {
 
 			// 记录进度
 			cli.DownloadingFiles[filename].NowSize += payloadLen
+
+			fmt.Println("receive data piece from ", remoteAddr.String(), " : ", string(payload))
 
 			// 进度
 			progress := float64(cli.DownloadingFiles[filename].NowSize) / float64(cli.DownloadingFiles[filename].Filesize) * 100
@@ -202,6 +177,8 @@ func readFrom(cli *Client, conn *net.UDPConn) {
 		case Message:
 			fmt.Println("receive from " + remoteAddr.String() + ": " + string(payload))
 		}
+
+		time.Sleep(time.Second)
 	}
 }
 
@@ -213,12 +190,30 @@ func NewClient(ip string, port int) (*Client, error) {
 		Port: port,
 	}
 
+	conn, err := net.ListenUDP("udp", myAddr)
+	if err != nil {
+		return nil, err
+	}
 	cli := &Client{
 		AuthAddr:         []string{},
-		ConnToOthers:     []*net.UDPConn{},
 		DownloadingFiles: map[string]*fileInfo{},
 		MyAddr:           myAddr,
+		Lis:              conn,
 	}
+
+	// 向server发送hello
+	info := fmt.Sprintf("this is %s\n", cli.MyAddr.String())
+	d, err := GetFrameBytes(ConnectSvr, 0, info)
+	if err != nil {
+		return nil, err
+	}
+	_, err = cli.Lis.WriteToUDP(d, ServerAddr)
+
+	// 开启goroutine接受server信息
+	go cli.read()
+
+	// 定时向服务器发送心跳
+	go cli.ping()
 
 	return cli, nil
 }
